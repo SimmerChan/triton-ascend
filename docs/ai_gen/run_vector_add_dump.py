@@ -16,9 +16,15 @@ import os
 
 # 必须在 import triton 之前设置(knobs 惰性读取环境变量,但提前设置最稳妥)
 os.environ.setdefault("TRITON_KERNEL_DUMP", "1")
+# 强制跳过缓存命中重新编译, 保证 cache/dump 目录本次必然生成新交付件
+os.environ.setdefault("TRITON_ALWAYS_COMPILE", "1")
 
 import glob
+import struct
+import subprocess
+import shutil
 import time
+from pathlib import Path
 
 import torch
 import torch_npu  # noqa: F401  注册 npu 设备
@@ -64,6 +70,62 @@ def dump_file_head(path: str, max_lines: int = 25) -> None:
         print(f"  <无法读取: {e}>")
 
 
+def print_elf_info(path: str) -> None:
+    """解析并打印 npubin 的 ELF 头;有 readelf 时附完整头与段表。"""
+    data = Path(path).read_bytes()
+    if data[:4] != b"\x7fELF":
+        print(f"  非 ELF 文件, 前 32 字节 hex: {data[:32].hex(' ')}")
+        return
+    ei_class = {1: "ELF32", 2: "ELF64"}.get(data[4], "?")
+    ei_data = {1: "little", 2: "big"}.get(data[5], "?")
+    machine_names = {40: "EM_ARM", 62: "EM_X86_64", 183: "EM_AARCH64", 243: "EM_RISCV"}
+    if ei_class == "ELF64":
+        fmt = "<" if data[5] == 1 else ">"
+        e_type, e_machine = struct.unpack_from(fmt + "HH", data, 16)
+        e_shoff, = struct.unpack_from(fmt + "Q", data, 0x28)
+        e_shnum, = struct.unpack_from(fmt + "H", data, 0x3C)
+        print(f"  class={ei_class}  endian={ei_data}  type={e_type}  "
+              f"machine={machine_names.get(e_machine, e_machine)}")
+        print(f"  section headers: {e_shnum} 个 @ offset 0x{e_shoff:x}")
+    print(f"  前 64 字节 hex: {data[:64].hex(' ')}")
+    readelf = shutil.which("readelf")
+    if readelf:
+        ret = subprocess.run([readelf, "-h", "-S", path], capture_output=True, text=True)
+        if ret.returncode == 0:
+            print(ret.stdout[:2500])
+        else:
+            print(f"  (readelf 无法解析该镜像: {ret.stderr.strip().splitlines()[:1]})")
+    else:
+        print("  (板上无 readelf, 仅显示头部 hex)")
+
+
+def print_ir_for_feedback(all_files: dict) -> None:
+    """打印逐行 IR 精讲所需的完整材料, 输出整段可直接复制反馈。"""
+    print_header("STEP 4. 完整 IR 输出(整段复制即可用于逐行讲解)")
+    full_exts = (".ttir", ".ttadapter", ".bcmlir")
+    printed = False
+    for name, path in sorted(all_files.items()):
+        ext = Path(name).suffix
+        if ext in full_exts:
+            size = os.path.getsize(path)
+            print(f"\n════════ {name} (FULL, {size} bytes) ════════")
+            print(Path(path).read_text(errors="replace"))
+            printed = True
+        elif ext == ".mlirbc":
+            data = Path(path).read_bytes()[:32]
+            print(f"\n════════ {name} (前 32 字节 hex) ════════")
+            print(f"  {data.hex(' ')}")
+            print(f"  magic: {data[:4]!r} (MLIR 字节码魔数应为 b'ML\\xefR')")
+            printed = True
+        elif ext == ".npubin":
+            print(f"\n════════ {name} (ELF 头解析, {os.path.getsize(path)} bytes) ════════")
+            print_elf_info(path)
+            printed = True
+    if not printed:
+        print("(未找到可打印的 IR/二进制交付件)")
+    print("\n════════ 以上内容整段复制即可 ════════")
+
+
 def newest_cache_entries(root: str, since: float):
     """返回 root 下 mtime 晚于 since 的文件,按目录分组。"""
     result = {}
@@ -100,7 +162,7 @@ def main() -> None:
         for f in sorted(groups[d]):
             print(f"  {os.path.basename(f):<48} {os.path.getsize(f):>10} bytes")
 
-    print_header("STEP 3. dump 目录 ~/.triton/dump 中各阶段 IR")
+    print_header("STEP 3. dump 目录 ~/.triton/dump 中的各阶段 IR 文件")
     dump_root = os.path.expanduser(os.environ.get("TRITON_DUMP_DIR", "~/.triton/dump"))
     dump_groups = newest_cache_entries(dump_root, t0 - 5)
     stage_order = ["kernel.ttir.mlir", "kernel.ttadapter.mlir", "kernel.mlirbc",
@@ -110,12 +172,17 @@ def main() -> None:
         files = sorted(dump_groups[d], key=lambda f: stage_order.index(os.path.basename(f))
                        if os.path.basename(f) in stage_order else 99)
         print(f"\n[{d}]  ->  {', '.join(os.path.basename(f) for f in files)}")
-        for f in files:
-            shown = True
-            if f.endswith((".mlir", ".ttir", ".ttadapter")) or os.path.basename(f) in stage_order:
-                dump_file_head(f)
+        shown = True
     if not shown:
         print("(未发现 dump —— 检查 TRITON_KERNEL_DUMP 是否在 import triton 前生效)")
+
+    # 合并 cache 与 dump 中本次新生成的文件, 供 STEP 4 按扩展名打印全文
+    all_files = {}
+    for grp in (groups, dump_groups):
+        for _, fs in grp.items():
+            for f in fs:
+                all_files.setdefault(os.path.basename(f), f)
+    print_ir_for_feedback(all_files)
 
     print_header("完成:TTIR → ttadapter → mlirbc → bcmlir → npubin 全链路交付件已生成")
 
