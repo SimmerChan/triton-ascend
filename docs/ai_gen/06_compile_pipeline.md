@@ -255,6 +255,16 @@ pytest third_party/ascend/unittest/pytest_ut/test_01_vector_add.py
 | `.ttadapter` | linalg/hivm 块内 `hivm.*` 指令序列(已绑定 AIV/UB、tile 形状与 `mix_mode = "aiv"`) |
 | `.npubin` | Vector 核机器码(ELF,`aclrtBinaryGetFunction` 按名 `add_kernel` 取入口) |
 
+### 6.1 实测验证记录(Ascend950PR_9579,CANN 9.x)
+
+在 950 机器上运行 [run_vector_add_dump.py](run_vector_add_dump.py) 的实测结论(2026-09-30):
+
+1. **cache 目录 8 个交付件与第 5 节清单完全一致**:`add_kernel.source/.ttir/.ttadapter/.mlirbc/.bcmlir/.npubin + .json + __grp__.json`;其中 `.npubin` 15600 字节(ELF)。
+2. **硬件为 950 家族**(`hacc.target = #hacc.target<"Ascend950PR_9579">`),故 npubin 阶段走 `linalg_to_bin_enable_npu_compile_910_95` 分支。
+3. **ttadapter 的隐式参数**:函数签名前端多出 `%arg0: memref<?xi8>`(syncBlockLock)与 `%arg1: memref<?xi8>`(workspace),由函数属性 `SyncBlockLockArgIdx = 0`、`WorkspaceArgIdx = 1` 声明——这正是第 4 节 launcher 打包 workspace/syncBlockLock 的 IR 侧对应物;`tt.tensor_kind = 0/1` 区分输入/输出,与 `_parse_linalg_metadata` 提取的 `tensor_kinds` 一致。
+4. **mask 降级形态**:`offsets < n_elements` 的尾块判断被降为 `scf.if` + `hivm.unlikely_condition` + `memref.subview` 动态切片,`linalg.fill` 仅在(几乎不走的)越界分支填 padding。
+5. **dump 与 cache 目录 hash 不同是设计行为**:dump 用 `src.hash`(仅源码+签名+常量,compiler.py:71-76),cache 用完整 key(triton_key+src.hash+backend.hash+options.hash+env,含 CANN 版本文件哈希)。同一 kernel 源码,`~/.triton/dump/<src_hash>/` 与 `~/.triton/cache/<full_hash>/` 目录名必然不同。
+
 ## 7. 常用环境变量
 
 | 变量 | 作用 |
