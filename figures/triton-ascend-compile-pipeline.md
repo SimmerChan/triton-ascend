@@ -1,0 +1,100 @@
+# Triton-Ascend 编译全流程图(昇腾独有 vs 开源共性)
+
+展示一个算子从 `@triton.jit` DSL 到 NPU 二进制(`{name}.npubin`)的完整编译链路。
+颜色标记:🟦 开源社区共性 · 🟧 昇腾独有 · 🟪 共性框架·昇腾实现 · 🟩 磁盘交付件。
+详细阶段说明见 [docs/ai_gen/06_compile_pipeline.md](../docs/ai_gen/06_compile_pipeline.md)。
+
+```mermaid
+flowchart TD
+    %% ============ 图例 ============
+    legend["图例: 🟦 开源社区共性　🟧 昇腾独有　🟪 共性框架·昇腾实现　🟩 磁盘交付件"]
+
+    %% ============ ① JIT 入口 ============
+    subgraph JIT["① JIT 入口与参数绑定 — 开源 Triton 共性"]
+        direction TB
+        kernel["@triton.jit add_kernel<br/>kernel[grid](x, y, out, BLOCK_SIZE)"]
+        run["JITFunction.run<br/>binder 绑定 · 值=1/对齐16 特化 · cache key"]
+        kernel --> run
+    end
+
+    %% ============ ② 前端 ============
+    subgraph FE["② 前端降级与 TTIR 优化 — 主体开源共性"]
+        direction TB
+        ast["ast_to_ttir<br/>Python AST → TTIR"]
+        srcf["{name}.source"]
+        ttir["make_ttir<br/>inliner · canonicalize · CSE · LICM"]
+        graphopt["+ add_graph_optimize<br/>UB 预算感知图优化(可选)"]
+        ttirf["{name}.ttir"]
+        ast --> srcf
+        srcf --> ttir
+        ttir -.可选.-> graphopt
+        ttir --> ttirf
+    end
+
+    %% ============ ③④⑤⑥ 昇腾降级 ============
+    subgraph ASC["③④⑤⑥ 昇腾独有:降级到 Linalg/HIVM 并生成二进制"]
+        direction TB
+        adapter["ttir_to_linalg<br/>TritonToStructure → HIVM → HFusion → Linalg 等进程内 passes"]
+        ttadf["{name}.ttadapter (linalg/hivm + mix_mode)"]
+        mopt["triton-mlir-opt --emit-bytecode"]
+        mlirbcf["{name}.mlirbc (字节码)"]
+        bopt["bishengir-opt"]
+        bcmlirf["{name}.bcmlir"]
+        bcomp["bishengir-compile<br/>--target=arch --enable-triton-kernel-compile"]
+        npubinf["★ {name}.npubin<br/>算子二进制 (ELF)"]
+        adapter --> ttadf
+        ttadf --> mopt
+        mopt --> mlirbcf
+        mlirbcf --> bopt
+        bopt --> bcmlirf
+        bcmlirf --> bcomp
+        bcomp --> npubinf
+    end
+
+    %% ============ ⑦ 运行时 ============
+    subgraph RT["⑦ 加载与启动"]
+        direction TB
+        handles["CompiledKernel._init_handles<br/>(patch 注入 mix_mode 参数)"]
+        lso["make_launcher 生成 C++ →<br/>__triton_launcher.so (g++ -lascendcl)"]
+        nus["npu_utils.so<br/>workspace / syncBlockLock"]
+        reg["aclrtBinaryLoadFromData<br/>aclrtBinaryGetFunction"]
+        launch["aclrtLaunchKernelWithHostArgs"]
+        handles --> lso
+        handles --> nus
+        nus --> reg
+        lso --> launch
+        reg --> launch
+    end
+
+    %% ============ NVIDIA 对照 ============
+    subgraph REF["NVIDIA 上游对照路径(本仓库不存在)"]
+        direction LR
+        nvgir["{name}.ttgir"]
+        nllir["{name}.llir"]
+        nptx["{name}.ptx"]
+        ncubin["{name}.cubin"]
+        nvgir --> nllir
+        nllir --> nptx
+        nptx --> ncubin
+    end
+
+    %% ============ 主链路 ============
+    run --> ast
+    ttirf --> adapter
+    npubinf --> handles
+    ttir -.若为 NVIDIA 上游.-> nvgir
+
+    %% ============ 样式 ============
+    classDef common fill:#DBEAFE,stroke:#2563EB,color:#1E3A8A,stroke-width:2px
+    classDef ascend fill:#FFEDD5,stroke:#EA580C,color:#7C2D12,stroke-width:2px
+    classDef hybrid fill:#EDE9FE,stroke:#7C3AED,color:#4C1D95,stroke-width:2px
+    classDef artifact fill:#F0FDF4,stroke:#10B981,color:#064E3B,stroke-width:2px
+    classDef legendStyle fill:#FFFFFF,stroke:#94A3B8,color:#334155,stroke-width:1px
+
+    class kernel,run,ast,ttir common
+    class graphopt,adapter,mopt,bopt,bcomp,nus,reg,launch ascend
+    class handles,lso hybrid
+    class srcf,ttirf,ttadf,mlirbcf,bcmlirf,npubinf artifact
+    class nvgir,nllir,nptx,ncubin common
+    class legend legendStyle
+```
