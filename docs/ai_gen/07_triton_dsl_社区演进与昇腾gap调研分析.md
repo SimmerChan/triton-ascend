@@ -179,6 +179,112 @@
 
 ---
 
+## 5. 一页 PPT 内容布局方案:"Triton:社区规划 · 搜广推实践 · 客户现状 · 关键差距"
+
+> 面向管理层/评审的一页 16:9 PPT。原则:四象限 + 底部行动条,每象限 ≤4 条要点 + 1 张图;以下 mermaid/表格均为可直接渲染或照排的图表示例。数据出处见 §5.6。
+
+### 5.0 版面总览
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│ 标题:Triton —— 社区往哪走 · 搜广推怎么用 · 客户用得怎样 · 昇腾差在哪      │
+│ 副题:Triton 3.6→3.8 / Meta 搜广推 kernel 团队 / 客户算子库 366 算子 / 5 家头部客户模型  │
+├───────────────────────────────┬────────────────────────────────────┤
+│ ① 社区规划(时间线图)            │ ② 搜广推怎么用(标杆+收益条形图)         │
+├───────────────────────────────┼────────────────────────────────────┤
+│ ③ 客户自定义算子现状(环形图+数字) │ ④ 关键差距(三色矩阵)                 │
+├───────────────────────────────┴────────────────────────────────────┤
+│ 行动条:P0 plugin化 → P1 norm/IKBO/MoE 移植 → P2 自动化 → P3 tlx-ascend │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.1 象限① 社区规划(左上)
+
+要点(单行短句):
+- **自动化** autoWS 一个开关接近 cuDNN;**低层化** Gluon/TLX 兜底;**协作化** multi-CTA/TMA multicast;**开放化** plugin 零 fork(3.7+)
+
+图示例(mermaid timeline,渲染后贴入):
+
+```mermaid
+timeline
+    title Triton 社区 3.6 → 3.8 主线
+    3.6 · 2026-01 : LinearLayout 统一 Layout 体系 : ragged TMA atomic add
+    3.7 · 2026-05 : Plugin Extensions 零 fork 扩展 : 2CTA + TMA multicast : AMD warp-spec
+    3.8 · 2026-08 : multi-CTA 全面化(reduction/gather) : FpSan/GSan/ConSan : 插件自定义 DSL op
+    Roadmap 持续  : autoWS profile-guided : megakernel 跨 kernel 融合 : TLX 入 PyTorch 2.12
+```
+
+### 5.2 象限② 搜广推怎么用(右上)
+
+要点:
+- 归一化占搜广推基座训练延迟 ~20%;user 嵌入广播 ~70×;target attention ~40% 推理延迟——三大痛点全被社区开源解法命中
+- 收益来自 **kernel 结构 + 数学恒等式**,非等编译器进化
+
+图示例(收益条形,照排或用 PPT 原生条形图):
+
+| Meta 标杆(全部开源) | 核心手段 | 收益(已发表) | 条形示意 |
+|---|---|---|---|
+| Free Normalization | Lazy Pre-Norm 恒等式 + multi-CTA epilogue | 隐藏 90% norm 延迟 / FNA +35% | ██████████ |
+| IKBO(LCE/FA) | kernel 内广播消除 + WS 持久化融合 | LCE ~4× / FA 621 TFLOPs | ████████ |
+| fast_moe | fused index_select+BMM / jagged | 生产代码开源 | ███ |
+
+### 5.3 象限③ 客户自定义算子现状(左下)
+
+要点(A5 实测口径):
+- 客户算子库 **366 个**自定义算子,**Triton 系已占 26%**(96 个);功能 top:attention 55 / MoE 45 / norm 44 / embedding 26 / FP8 13
+- Inductor+Triton 实测收益:算子数 **-35~47%**、device 时间 **-20~37%**(字节 19 模型 + qianchuanv3,224 个 triton fused kernel)
+- **卡点即机会**:大 bs 下 Triton tiling 输 CANN 标准算子(BMM +25%);2 个模型编译失败;融合后 Slice/查表占比反弹至 26~40%;客户自研 triton target-attention 单核占比 10.1%
+- 客户覆盖:字节(lego 算子库 139 算子 / qianchuan / engine_21)、Shopee(HSTU:8 个自研 triton 算子)、腾讯 WXG(rank_mixer)、momo、唯品会
+
+图示例(mermaid pie,渲染后贴入):
+
+```mermaid
+pie title 366 个客户自定义算子的实现类型分布
+    "CUDA C/C++" : 253
+    "Triton" : 84
+    "Triton+CUDA 混合" : 12
+    "BangC/MLU" : 11
+    "C++/CPU" : 6
+```
+
+### 5.4 象限④ 关键差距(右下)
+
+图示例(三色矩阵,照排;✅=有 ⚠️=部分/降级 ❌=缺):
+
+| 关键能力 | 社区 | 昇腾 TA | 性质 |
+|---|:-:|:-:|---|
+| Plugin 零 fork 扩展 | ✅ 3.7+ | ❌ 1192 行 patch fork | 结构性 |
+| 上游版本跟随 | ✅ 3.8 | ⚠️ 停 3.6(滞后 2 个 minor) | 结构性 |
+| TMA/TensorDescriptor | ✅ 持续增强 | ❌ 降级为指针 | 能力性 |
+| multi-CTA / cluster / DSMEM | ✅ 3.7/3.8 | ❌ 无硬件 | 能力性 |
+| autoWS 自动流水 | ✅ | ⚠️ 手动 cube/vector scope | 能力性 |
+| Gluon/TLX 生态语料 | ✅ PyTorch 2.12 | ❌ 不可运行 | 生态性 |
+| Sanitizer/kernel 内 tracer | ✅ 3.8 | ❌ 仅计时 | 工具链 |
+| 社区 kernel 旋钮兼容 | ✅ 全量 | ⚠️ 静默降级 | 泛化性 |
+| **cube/vector 双核 + fixpipe pre-quant**(反向优势) | ❌ | ✅ 昇腾独有 | 增量 |
+
+一行结论(放在象限底部):**最大差距是"分发模式"而非单点算子——plugin 化可一并解除版本/生态两项结构性差距**。
+
+### 5.5 底部行动条(贯穿页面)
+
+```
+P0 plugin化改造 + 跟随 3.7/3.8 + Inductor 通路  →  P1 norm融合 · IKBO广播消除 · MoE/target-attn 移植(客户需求已在场上)
+→  P2 autoWS 式自动化 + sanitizer/tracer  →  P3 tlx-ascend 翻译层承接 GPU 语料
+```
+
+### 5.6 本节新增数据来源
+
+| 编号 | 来源 | 位置/链接 |
+|---|---|---|
+| C1 | xperf_ops 算子源码汇总(366 个自定义算子:类型/功能族/代码量统计口径) | /Users/huangshilei/Downloads/xperf_ops算子源码汇总.csv |
+| C2 | 客户模型分析集(字节 engine_21/qianchuan、Shopee HSTU、腾讯 WXG rank_mixer、momo、唯品会 p13n) | /Users/huangshilei/Documents/tech/recommendation/customer_algorithm/ |
+| C3 | qianchuanv3 eager vs Inductor 对比(算子数 -47%、224 个 triton fused kernel、device 21.8%、bs400 BMM +25%) | customer_algorithm/bytedance/qianchuanv3/qianchuanv3_eager_vs_inductor.md |
+| C4 | engine_21_models A5 profiling(19 模型:device -20~37%、编译失败案例、toutiao triton target-attention 占比 10.1%) | customer_algorithm/bytedance/engine_21_models/profiling_analysis_260920/engine_21_models_profiling_analysis.md |
+| C5 | Shopee HSTU 模型分析(triton_ops 自研算子族/CUTLASS-Triton-PyTorch 后端可选/FusedHSTULayer) | customer_algorithm/sea/hstu_v12_model_analysis_report.md |
+
+
+---
+
 ## 参考来源
 
 ### 网络来源
@@ -208,4 +314,5 @@
 | L3 | `tensor_descriptor` 降级为指针重写 | third_party/ascend/backend/compiler.py:313(`add_rewrite_tensor_descriptor_to_pointer`) |
 | L4 | 编译管线五阶段(ttir→ttadapter→mlirbc→bcmlir→npubin)与 Ascend950PR 实测验证 | docs/ai_gen/06_compile_pipeline.md |
 | L5 | 昇腾后端自动调优面(`ubtuner`/`max_autotune`/`enable_hivm_auto_cv_balance`/自动 multibuffer) | docs/ai_gen/api_analysis/05_ext_backends_ascend.md |
+| C1–C5 | 客户自定义算子库与 5 家客户模型分析数据(§5.6 详列) | 见 §5.6 |
 | L6 | 本地仓库版本基线(`__version__ = '3.6.0'`;head commit `5e55d2a23`)与 TLX meetup 记录 | python/triton/__init__.py;docs/meetups/11-05-2025/notes.md |
