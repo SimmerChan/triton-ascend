@@ -94,7 +94,7 @@
 |---|---|---|---|---|---|
 | 1 | **Plugin Extensions / out-of-tree 扩展**(3.7/3.8) | `TRITON_PLUGIN_PATHS` 动态加载,自定义方言/op/pass,TLX 零 fork;3.8 支持自定义 DSL op 与 AxisInfo 扩展;官方下一步 = out-of-tree backend | 构建期 1192 行 patch 侵入 code_generator;整仓 fork 分发(`install_requires triton==3.6.0`) | **结构性,P0** | [S4][L1][L2] |
 | 2 | **上游版本跟随** | 已到 3.8.0(2026-08-28) | 停在 3.6.0(2026-01-21),差 2 个 minor | **结构性,P0** | [S1][L2] |
-| 3 | **autoWS 自动 warp specialization**(3.4+,持续 roadmap) | `warp_specialize=True` 开箱;Hopper/Blackwell;FA fwd 接近 cuDNN;roadmap 走 profile-guided | 无自动执行分区;手动对应物是 `al.scope(cube/vector)` 核级并行 + sync_block(粒度更粗但昇腾双核天然并行);SIMT 模式承接 warp 线程语义(实验性) | 能力性(自动部分缺失,手动部分有对等物) | [S3][L1] |
+| 3 | **autoWS 自动 warp specialization**(3.4+,持续 roadmap) | `warp_specialize=True` 开箱;Hopper/Blackwell;FA fwd 接近 cuDNN;roadmap 走 profile-guided | **有核级自动对等物:ssbuf-based DynamicCVPipeline**(A5 默认开启,自动 C/V 分区→依赖分析→多缓存→核间同步→访存/计算解耦[L7]);但仅核级两分区、无 warp 级多分区、`enable_persistent` 为死字段(无持久化语义)、启发式调度;手动入口 `al.scope` + sync_block;SIMT 模式承接 warp 线程语义(实验性) | 能力性(机制同构,表达力与持久化维度不等价) | [S3][L1][L7] |
 | 4 | **TMA / TensorDescriptor**(3.4→3.8 持续增强) | ragged/multicast/gather-scatter/on-device descriptor | `tensor_descriptor` 恒被 `add_rewrite_tensor_descriptor_to_pointer` 降级为指针([L3]);社区博客里 TMA 依赖的 kernel 结构(异步预取、descriptor 复用)不可表达 | **能力性,P1**(影响社区 kernel 移植保真度) | [S1][L3][L1] |
 | 5 | **multi-CTA / cluster / DSMEM**(3.7/3.8) | 2CTA mode、通用 multi-CTA reduction/layout conversion、multicast | 无 CTA cluster 硬件;跨 program 协作只能走 GM/L2 + 同步;"Multi-CTA Norm"类算法无硬件直译 | **能力性,P1**(§3.2 算法受影响) | [S1][S5] |
 | 6 | **mbarrier(phase/expect_bytes)** | tlx.mbarrier 族、autoWS channel 同步基础 | `sync_block_set/wait`(event 0–15 + pipe 属性),无 phase/byte-count 语义;`sync_block_lock` 自旋锁 | 能力性(可映射、需适配) | [S4][L1] |
@@ -110,7 +110,7 @@
 **(a) 分发结构差距是"因",其余多为"果"。** 上游 3.7 起官方把"fork"定义为反模式并给出 plugin 解法[S4];TA 的 patch 模式导致每次跟进上游都要重做 1192 行 patch,跟进成本 O(版本),于是实际停留在 3.6.0——而 3.7/3.8 的 plugin、multi-CTA、sanitizer、aggregate 等特性反过来又被这个滞后挡在门外[L1][S1]。**一旦迁移到 plugin/triton-ext 模式,Gap #1/#2 解除,且"昇腾后端作为 out-of-tree 插件"正是官方 What's Next 点名的方向(custom backends: Intel、CPU…)**[S4]。
 
 **(b) 硬件假设差距:社区特性的"第一假设"是 NVIDIA GPU。** TMA/cluster/DSMEM/TMEM/CLC/mbarrier 全部源自 NVIDIA 逐代硬件,AMD 是追赶的第二主力[S1];昇腾的 Cube/Vector 双核 + MTE + 分级片上存储(UB/L1/L0)模型与 GPU warp 模型在语义层不同构[L1][L2]。因此:
-- 社区的**编译器自动化 pass**(autoWS 的 partition/memory planner、LinearLayout 体系)不能被 TA 直接复用,需要昇腾版"等价物"——好消息是部分等价物已存在(自动 multibuffer、`enable_hivm_auto_cv_balance` 双核负载均衡、ubtuner 自动调优)[L5],缺的是把它们统一成 autoWS 式的"声明一个开关,编译器全权负责"体验;
+- 社区的**编译器自动化 pass**(autoWS 的 partition/memory planner、LinearLayout 体系)不能被 TA 直接复用,需要昇腾版"等价物"——好消息是**核级等价物已存在:ssbuf-based DynamicCVPipeline**(自动 C/V 分区流水,A5 默认开启[L7])加自动 multibuffer、`enable_hivm_auto_cv_balance` 双核负载均衡、ubtuner 自动调优[L5];差距在于仅核级两分区(GPU 为 warp 级多分区)、无持久化语义(`enable_persistent` 死字段)、调度为启发式(buffer 阈值 1/2)而非 profile-guided;
 - 社区的**算法层创新**(数学恒等式、kernel 结构)与硬件无关,可以低成本移植(§3.2)——这正是搜广推业务收益最快的部分。
 
 **(c) 行为泛化差距:同一份社区 kernel 代码在 TA 上的"静默降级"面较大。** `eviction_policy`/`num_stages`/`num_ctas`/`tl.range` flag 等社区 kernel 常用旋钮在 TA 上无效或不完整[L2],导致"能编译 ≠ 能得到社区同级性能",也使社区 autotune 空间(GPU 上的 tuning 维度)在 TA 上不可比。这属于**泛化支持差距中最影响用户心智的部分**:需要显式的兼容性声明与自动降级提示(TA 已有 `_ascend_constraints.py` 约束文档,但用户感知路径弱)[L2]。
@@ -123,6 +123,30 @@
 | 零拷贝 gather | `index_select_simd`(GM→UB 零拷贝)、`bl.subview` 视图 | 需 TMA/共享内存中转 |
 | UB 自动调优 | `@ubtuner` 贪心搜索 bisheng 编译选项组合 | Helion autotune(维度不同) |
 | `max_autotune` 按 cube/mixcv/vector 三类算子展开调参 | [L5] | triton.Config 空间 |
+
+### 2.4 两个关键缺口的影响量化:无持久化语义 × 启发式调度
+
+> ssbuf CV 流水与 autoWS 机制同构(§2.2 #3),差距收敛到两点——**无持久化语义**(`enable_persistent` 为死字段[L7])与**启发式调度**(buffer 阈值硬编码,非 profile-guided)。GPU 侧公开数据可分别标定这两点的价值[L7][S5][S6]。
+
+**无持久化语义的影响(丢掉"最后一波"优化)**:
+
+| 影响 | 机制 | GPU 侧量化锚点 |
+|---|---|---|
+| tile 间流水空泡 | 每 tile 边界的 UB 预热/MTE 重启无法编排进流水;持久化下 producer 持续预取、tile 无缝流动 | IKBO 最后一段优化(持久化+WS)单独贡献 **16.9%**,"no cross-tile gaps" |
+| wave 量化损失 | tile 数不整除核数时末 wave 空转;解法(bidirectional 领 tile)依赖 kernel 内自调度 | IKBO Stage1/2 反向领 tile;昇腾 grid 静态 + FFTS 分发,无此自由度 |
+| 跨 stage megakernel 受限 | 多 stage 常驻一 kernel 的跨 stage 重叠/launch 消除/L2 复用不可表达 | NCU:occupancy 6.25%→18.75%、DRAM 39%→52%、L2 74%→84% |
+| 跨 CTA 协议无法表达 | per-tile release-acquire 等协议建立在常驻 kernel 上 | IKBO 三步同步协议 |
+
+**启发式调度的影响(质量天花板 + 静默降级)**:
+
+| 影响 | 机制 | 证据/锚点 |
+|---|---|---|
+| 边界形状选错调度 | UB 临界、C:V 失衡、复杂依赖下,阈值规则要么缓存不足(停等)要么溢出(降级/失败) | 不支持场景前置排除(纯 C/纯 V 循环直接跳过)[L7] |
+| 做不了 ping-pong 类重叠 | 无 per-op 延迟模型,不知道"哪段慢" | autoWS roadmap 将 profile-guided 列为主线[S3] |
+| 调优维度错位 | ubtuner = 编译开关组合(每 kernel 一个配置),非 kernel 内调度方案搜索 → bs 动态场景逐形状调优、方差大 | 客户实测:大 bs Triton tiling 输 CANN,BMM +25%[C3] |
+| 静默回退 | ssbuf 失败 rc>0 自动 fallback,用户拿到回退路径性能且无感知 | `compiler.py` MAX_RETRY=2 回退逻辑[L7] |
+
+**对搜广推业务的分层结论**:① 两分区简单流水(norm+GEMM 单融合点、LCE 前三阶段)基本无损失,ssbuf 可拿到主要收益;② 多 stage megakernel(FlashNormAttention/IKBO 完整形态)最后 **15–17% 量级**收益拿不到,五分区结构需降级重排;③ 大 M 小 K/N 典型推荐形状 + bs 动态生产环境下,性能方差大、逐形状调优成本高。→ P2 的"autoWS 式自动化"据此具体化为:① mspti 驱动的 per-op 延迟模型;② ubtuner 从开关搜索升级为调度方案搜索;③ 与 NPU 编译器团队评估 A5 上 kernel 内自调度(persistent 等价物)可行性。
 
 ---
 
@@ -266,15 +290,22 @@ pie title 366 个客户自定义算子的实现类型分布
 | 上游版本跟随 | ✅ 3.8 | ⚠️ 停 3.6(滞后 2 个 minor) | 结构性 |
 | TMA/TensorDescriptor | ✅ 持续增强 | ❌ 降级为指针 | 能力性 |
 | multi-CTA / cluster / DSMEM | ✅ 3.7/3.8 | ❌ 无硬件 | 能力性 |
-| autoWS 自动流水 | ✅ | ⚠️ 手动 cube/vector scope | 能力性 |
+| autoWS 自动流水 | ✅ warp 级多分区+持久化 | ⚠️ 核级自动流水(ssbuf,默认开);无持久化、两分区上限 | 能力性 |
 | Gluon/TLX 生态语料 | ✅ PyTorch 2.12 | ❌ 不可运行 | 生态性 |
 | Sanitizer/kernel 内 tracer | ✅ 3.8 | ❌ 仅计时 | 工具链 |
 | 社区 kernel 旋钮兼容 | ✅ 全量 | ⚠️ 静默降级 | 泛化性 |
 | **cube/vector 双核 + fixpipe pre-quant**(反向优势) | ❌ | ✅ 昇腾独有 | 增量 |
 
+两个核心缺口的影响速查(可作矩阵脚注):
+
+| 缺口 | 一句话影响 |
+|---|---|
+| 无持久化语义 | tile 间空泡 + wave 量化 + 跨 stage megakernel 受限 → megakernel 类最后 **15–17%** 收益拿不到(IKBO 锚点) |
+| 启发式调度 | 边界形状选错调度 + 无 per-op 模型做不了 ping-pong + 逐形状调优 → bs 动态场景性能方差大(大 bs BMM +25%) |
+
 关键结论(1–3 条,置于三色矩阵下方作为本象限收束):
 1. **最大差距是分发模式(fork+patch vs plugin),不是缺某个算子** —— 它连锁导致版本滞后(3.6 vs 3.8)与 PyTorch 2.12 生态脱钩,plugin 化可一并解除
-2. **能力差距集中在 GPU 硬件原语**(TMA/multi-CTA/mbarrier 无硬件对应)→ 社区搜广推 kernel 移植保真度受限,需按"算法直用/结构重构/硬件裁剪"三层分流
+2. **自动化流水昇腾有核级等价物(ssbuf CV 流水默认开启),但 warp 级多分区与持久化语义缺失**,能力差距仍集中在 GPU 硬件原语(TMA/multi-CTA/mbarrier 无硬件对应)→ 社区搜广推 kernel 移植保真度受限,需按"算法直用/结构重构/硬件裁剪"三层分流
 3. **昇腾有反向优势**:cube/vector 物理双核 + fixpipe pre-quant/pre-relu 是 GPU 没有的 free 能力 → norm 融合类场景契合度不低于 GPU
 
 ### 5.5 底部行动条(贯穿页面)
@@ -327,4 +358,5 @@ P0 plugin化改造 + 跟随 3.7/3.8 + Inductor 通路  →  P1 norm融合 · IKB
 | L4 | 编译管线五阶段(ttir→ttadapter→mlirbc→bcmlir→npubin)与 Ascend950PR 实测验证 | docs/ai_gen/06_compile_pipeline.md |
 | L5 | 昇腾后端自动调优面(`ubtuner`/`max_autotune`/`enable_hivm_auto_cv_balance`/自动 multibuffer) | docs/ai_gen/api_analysis/05_ext_backends_ascend.md |
 | C1–C5 | 客户自定义算子库与 5 家客户模型分析数据(§5.6 详列) | 见 §5.6 |
+| L7 | ssbuf-based DynamicCVPipeline 实现证据:pass 序列与 `addPasses`(`third_party/ascend/lib/DynamicCVPipeline/AddDynamicCVPipeline.cpp`)、pass 定义(`include/DynamicCVPipeline/Passes.td`)、ssbuf 阈值与 producer/consumer 分组(`include/DynamicCVPipeline/AddControlFlowCondition.h:31-33`)、A5 默认开启(`backend/compiler.py:1600-1603`)、挂载与回退(`backend/compiler.py:250-264,397-407`)、`enable_warp_specialization/enable_persistent` 死字段(`backend/compiler.py:1242-1243`) | third_party/ascend/ |
 | L6 | 本地仓库版本基线(`__version__ = '3.6.0'`;head commit `5e55d2a23`)与 TLX meetup 记录 | python/triton/__init__.py;docs/meetups/11-05-2025/notes.md |
